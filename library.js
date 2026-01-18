@@ -60,7 +60,7 @@ Google.init = async function (data) {
 	Google.settings.disableRegistration = loadedSettings.disableRegistration === 'on';
 };
 
-Google.exposeSettings = function (data) {
+Google.filterConfigGet = function (data) {
 	data['sso-google'] = {
 		style: Google.settings.style || 'light',
 	};
@@ -185,7 +185,7 @@ Google.getUidByGoogleId = async function (gplusid) {
 	return uid;
 };
 
-Google.addMenuItem = function (custom_header) {
+Google.addAdminMenuItem = function (custom_header) {
 	custom_header.authentication.push({
 		route: constants.admin.route,
 		icon: constants.admin.icon,
