@@ -1,249 +1,208 @@
 'use strict';
 
-(function (module) {
-	const User = require.main.require('./src/user');
-	const meta = require.main.require('./src/meta');
-	const db = require.main.require('./src/database');
-	const passport = require.main.require('passport');
-	const passportGoogle = require('passport-google-oauth20').Strategy;
-	const nconf = require.main.require('nconf');
-	const async = require.main.require('async');
-	const winston = require.main.require('winston');
+const nconf = require.main.require('nconf');
+const passportGoogle = require('passport-google-oauth20').Strategy;
 
-	const authenticationController = require.main.require('./src/controllers/authentication');
+const User = require.main.require('./src/user');
+const meta = require.main.require('./src/meta');
+const db = require.main.require('./src/database');
+const passport = require.main.require('passport');
 
-	const constants = Object.freeze({
-		name: 'Google',
-		admin: {
-			route: '/plugins/sso-google',
-			icon: 'fa-google-plus-square',
-		},
+const constants = Object.freeze({
+	name: 'Google',
+	admin: {
+		route: '/plugins/sso-google',
+		icon: 'fa-google-plus-square',
+	},
+});
+
+const Google = {
+	settings: {
+		id: process.env.SSO_GOOGLE_CLIENT_ID || undefined,
+		secret: process.env.SSO_GOOGLE_CLIENT_SECRET || undefined,
+		autoconfirm: 0,
+		style: 'light',
+		disableRegistration: false,
+	},
+};
+
+Google.init = async function (data) {
+	const hostHelpers = require.main.require('./src/routes/helpers');
+
+	hostHelpers.setupAdminPageRoute(data.router, '/admin/plugins/sso-google', (req, res) => {
+		res.render('admin/plugins/sso-google', {
+			title: constants.name,
+			baseUrl: nconf.get('url'),
+		});
 	});
 
-	const Google = {
-		settings: {
-			id: process.env.SSO_GOOGLE_CLIENT_ID || undefined,
-			secret: process.env.SSO_GOOGLE_CLIENT_SECRET || undefined,
-			autoconfirm: 0,
-			style: 'light',
-			disableRegistration: false,
-		},
+	hostHelpers.setupPageRoute(data.router, '/deauth/google', [data.middleware.requireUser], (req, res) => {
+		res.render('plugins/sso-google/deauth', {
+			service: 'Google',
+		});
+	});
+	data.router.post('/deauth/google', [data.middleware.requireUser, data.middleware.applyCSRF], hostHelpers.tryRoute(async (req, res) => {
+		await Google.deleteUserData({
+			uid: req.user.uid,
+		});
+		res.redirect(`${nconf.get('relative_path')}/me/edit`);
+	}));
+
+	const loadedSettings = await meta.settings.get('sso-google');
+	if (loadedSettings.id) {
+		Google.settings.id = loadedSettings.id;
+	}
+	if (loadedSettings.secret) {
+		Google.settings.secret = loadedSettings.secret;
+	}
+	Google.settings.autoconfirm = loadedSettings.autoconfirm === 'on';
+	Google.settings.style = loadedSettings.style;
+	Google.settings.disableRegistration = loadedSettings.disableRegistration === 'on';
+};
+
+Google.exposeSettings = function (data) {
+	data['sso-google'] = {
+		style: Google.settings.style || 'light',
 	};
 
-	Google.init = function (data, callback) {
-		const hostHelpers = require.main.require('./src/routes/helpers');
+	return data;
+};
 
-		hostHelpers.setupAdminPageRoute(data.router, '/admin/plugins/sso-google', (req, res) => {
-			res.render('admin/plugins/sso-google', {
-				title: constants.name,
-				baseUrl: nconf.get('url'),
-			});
-		});
-
-		hostHelpers.setupPageRoute(data.router, '/deauth/google', [data.middleware.requireUser], (req, res) => {
-			res.render('plugins/sso-google/deauth', {
-				service: 'Google',
-			});
-		});
-		data.router.post('/deauth/google', [data.middleware.requireUser, data.middleware.applyCSRF], hostHelpers.tryRoute(async (req, res) => {
-			await Google.deleteUserData({
-				uid: req.user.uid,
-			});
-			res.redirect(`${nconf.get('relative_path')}/me/edit`);
-		}));
-
-		meta.settings.get('sso-google', (_, loadedSettings) => {
-			if (loadedSettings.id) {
-				Google.settings.id = loadedSettings.id;
-			}
-			if (loadedSettings.secret) {
-				Google.settings.secret = loadedSettings.secret;
-			}
-			Google.settings.autoconfirm = loadedSettings.autoconfirm === 'on';
-			Google.settings.style = loadedSettings.style;
-			Google.settings.disableRegistration = loadedSettings.disableRegistration === 'on';
-			callback();
-		});
-	};
-
-	Google.exposeSettings = function (data, callback) {
-		data['sso-google'] = {
-			style: Google.settings.style || 'light',
-		};
-
-		callback(null, data);
-	};
-
-	Google.getStrategy = function (strategies, callback) {
-		if (Google.settings.id && Google.settings.secret) {
-			passport.use(new passportGoogle({
-				clientID: Google.settings.id,
-				clientSecret: Google.settings.secret,
-				callbackURL: `${nconf.get('url')}/auth/google/callback`,
-				userProfileURL: 'https://www.googleapis.com/oauth2/v3/userinfo', // https://github.com/jaredhanson/passport-google-oauth2/pull/51/files#diff-04c6e90faac2675aa89e2176d2eec7d8R102
-				passReqToCallback: true,
-			}, ((req, accessToken, refreshToken, profile, done) => {
-				if (req.hasOwnProperty('user') && req.user.hasOwnProperty('uid') && req.user.uid > 0) {
+Google.filterAuthInit = function (strategies) {
+	if (Google.settings.id && Google.settings.secret) {
+		passport.use(new passportGoogle({
+			clientID: Google.settings.id,
+			clientSecret: Google.settings.secret,
+			callbackURL: `${nconf.get('url')}/auth/google/callback`,
+			userProfileURL: 'https://www.googleapis.com/oauth2/v3/userinfo', // https://github.com/jaredhanson/passport-google-oauth2/pull/51/files#diff-04c6e90faac2675aa89e2176d2eec7d8R102
+			passReqToCallback: true,
+		}, (async (req, accessToken, refreshToken, profile, done) => {
+			try {
+				if (req?.user?.uid && req.user.uid > 0) {
 					// Save Google-specific information to the user
-					User.setUserField(req.user.uid, 'gplusid', profile.id);
-					db.setObjectField('gplusid:uid', profile.id, req.user.uid);
+					await Promise.all([
+						User.setUserField(req.user.uid, 'gplusid', profile.id),
+						db.setObjectField('gplusid:uid', profile.id, req.user.uid),
+					]);
 					return done(null, req.user);
 				}
 
-				Google.login(profile.id, profile.displayName, profile.emails[0].value, profile._json.picture, (err, user) => {
-					if (err) {
-						return done(err);
-					}
-
-					authenticationController.onSuccessfulLogin(req, user.uid, (err) => {
-						done(err, !err ? user : null);
-					});
-				});
-			})));
-
-			strategies.push({
-				name: 'google',
-				url: '/auth/google',
-				callbackURL: '/auth/google/callback',
-				icon: constants.admin.icon,
-				icons: {
-					normal: 'fa-brands fa-google',
-					square: 'fa-brands fa-google',
-					svg: `<svg version="1.1" xmlns="http://www.w3.org/2000/svg" height="16px" viewBox="0 0 48 48" class="LgbsSe-Bz112c"><g><path fill="#EA4335" d="M24 9.5c3.54 0 6.71 1.22 9.21 3.6l6.85-6.85C35.9 2.38 30.47 0 24 0 14.62 0 6.51 5.38 2.56 13.22l7.98 6.19C12.43 13.72 17.74 9.5 24 9.5z"></path><path fill="#4285F4" d="M46.98 24.55c0-1.57-.15-3.09-.38-4.55H24v9.02h12.94c-.58 2.96-2.26 5.48-4.78 7.18l7.73 6c4.51-4.18 7.09-10.36 7.09-17.65z"></path><path fill="#FBBC05" d="M10.53 28.59c-.48-1.45-.76-2.99-.76-4.59s.27-3.14.76-4.59l-7.98-6.19C.92 16.46 0 20.12 0 24c0 3.88.92 7.54 2.56 10.78l7.97-6.19z"></path><path fill="#34A853" d="M24 48c6.48 0 11.93-2.13 15.89-5.81l-7.73-6c-2.15 1.45-4.92 2.3-8.16 2.3-6.26 0-11.57-4.22-13.47-9.91l-7.98 6.19C6.51 42.62 14.62 48 24 48z"></path><path fill="none" d="M0 0h48v48H0z"></path></g></svg>`,
-				},
-				labels: {
-					login: '[[social:sign-in-with-google]]',
-					register: '[[social:sign-up-with-google]]',
-				},
-				color: '#1DA1F2',
-				scope: 'https://www.googleapis.com/auth/userinfo.profile https://www.googleapis.com/auth/userinfo.email',
-				prompt: 'select_account',
-			});
-		}
-
-		callback(null, strategies);
-	};
-
-	Google.appendUserHashWhitelist = function (data, callback) {
-		data.whitelist.push('gplusid');
-		setImmediate(callback, null, data);
-	};
-
-	Google.getAssociation = function (data, callback) {
-		User.getUserField(data.uid, 'gplusid', (err, gplusid) => {
-			if (err) {
-				return callback(err, data);
+				const userData = await Google.login(
+					profile.id, profile.displayName, profile.emails[0].value, profile._json.picture
+				);
+				done(null, userData);
+			} catch (err) {
+				done(err);
 			}
+		})));
 
-			if (gplusid) {
-				data.associations.push({
-					associated: true,
-					url: `https://plus.google.com/${gplusid}/posts`,
-					deauthUrl: `${nconf.get('url')}/deauth/google`,
-					name: constants.name,
-					icon: constants.admin.icon,
-				});
-			} else {
-				data.associations.push({
-					associated: false,
-					url: `${nconf.get('url')}/auth/google`,
-					name: constants.name,
-					icon: constants.admin.icon,
-				});
-			}
-
-			callback(null, data);
-		});
-	};
-
-	Google.login = function (gplusid, handle, email, picture, callback) {
-		const autoConfirm = Google.settings.autoconfirm;
-
-		Google.getUidByGoogleId(gplusid, (err, uid) => {
-			if (err) {
-				return callback(err);
-			}
-
-			if (uid !== null) {
-				// Existing User
-				callback(null, {
-					uid: uid,
-				});
-			} else {
-				// New User
-				const success = async (uid) => {
-					if (autoConfirm) {
-						await User.setUserField(uid, 'email', email);
-						await User.email.confirmByUid(uid);
-					}
-					// Save google-specific information to the user
-					User.setUserField(uid, 'gplusid', gplusid);
-					db.setObjectField('gplusid:uid', gplusid, uid);
-
-					// Save their photo, if present
-					if (picture) {
-						User.setUserField(uid, 'uploadedpicture', picture);
-						User.setUserField(uid, 'picture', picture);
-					}
-
-					callback(null, {
-						uid: uid,
-					});
-				};
-
-				User.getUidByEmail(email, (err, uid) => {
-					if (err) {
-						return callback(err);
-					}
-
-					if (!uid) {
-						// Abort user creation if registration via SSO is restricted
-						if (Google.settings.disableRegistration) {
-							return callback(new Error('[[error:sso-registration-disabled, Google]]'));
-						}
-
-						User.create({ username: handle, email: !autoConfirm ? email : undefined }, (err, uid) => {
-							if (err) {
-								return callback(err);
-							}
-
-							success(uid);
-						});
-					} else {
-						success(uid); // Existing account -- merge
-					}
-				});
-			}
-		});
-	};
-
-	Google.getUidByGoogleId = function (gplusid, callback) {
-		db.getObjectField('gplusid:uid', gplusid, (err, uid) => {
-			if (err) {
-				return callback(err);
-			}
-			callback(null, uid);
-		});
-	};
-
-	Google.addMenuItem = function (custom_header, callback) {
-		custom_header.authentication.push({
-			route: constants.admin.route,
+		strategies.push({
+			name: 'google',
+			url: '/auth/google',
+			callbackURL: '/auth/google/callback',
 			icon: constants.admin.icon,
-			name: constants.name,
+			icons: {
+				normal: 'fa-brands fa-google',
+				square: 'fa-brands fa-google',
+				svg: `<svg version="1.1" xmlns="http://www.w3.org/2000/svg" height="16px" viewBox="0 0 48 48" class="LgbsSe-Bz112c"><g><path fill="#EA4335" d="M24 9.5c3.54 0 6.71 1.22 9.21 3.6l6.85-6.85C35.9 2.38 30.47 0 24 0 14.62 0 6.51 5.38 2.56 13.22l7.98 6.19C12.43 13.72 17.74 9.5 24 9.5z"></path><path fill="#4285F4" d="M46.98 24.55c0-1.57-.15-3.09-.38-4.55H24v9.02h12.94c-.58 2.96-2.26 5.48-4.78 7.18l7.73 6c4.51-4.18 7.09-10.36 7.09-17.65z"></path><path fill="#FBBC05" d="M10.53 28.59c-.48-1.45-.76-2.99-.76-4.59s.27-3.14.76-4.59l-7.98-6.19C.92 16.46 0 20.12 0 24c0 3.88.92 7.54 2.56 10.78l7.97-6.19z"></path><path fill="#34A853" d="M24 48c6.48 0 11.93-2.13 15.89-5.81l-7.73-6c-2.15 1.45-4.92 2.3-8.16 2.3-6.26 0-11.57-4.22-13.47-9.91l-7.98 6.19C6.51 42.62 14.62 48 24 48z"></path><path fill="none" d="M0 0h48v48H0z"></path></g></svg>`,
+			},
+			labels: {
+				login: '[[social:sign-in-with-google]]',
+				register: '[[social:sign-up-with-google]]',
+			},
+			color: '#1DA1F2',
+			scope: 'https://www.googleapis.com/auth/userinfo.profile https://www.googleapis.com/auth/userinfo.email',
+			prompt: 'select_account',
 		});
+	}
 
-		callback(null, custom_header);
-	};
+	return strategies;
+};
 
-	Google.deleteUserData = async function (data) {
-		const { uid } = data;
-		const gplusid = await User.getUserField(uid, 'gplusid');
-		if (gplusid) {
-			db.deleteObjectField('gplusid:uid', gplusid);
-			db.deleteObjectField(`user:${uid}`, 'gplusid');
+Google.filterUserWhitelistFields = function (data) {
+	data.whitelist.push('gplusid');
+	return data;
+};
+
+Google.filterAuthList = async function (data) {
+	const gplusid = await User.getUserField(data.uid, 'gplusid');
+	if (gplusid) {
+		data.associations.push({
+			associated: true,
+			url: `https://plus.google.com/${gplusid}/posts`,
+			deauthUrl: `${nconf.get('url')}/deauth/google`,
+			name: constants.name,
+			icon: constants.admin.icon,
+		});
+	} else {
+		data.associations.push({
+			associated: false,
+			url: `${nconf.get('url')}/auth/google`,
+			name: constants.name,
+			icon: constants.admin.icon,
+		});
+	}
+	return data;
+};
+
+Google.login = async function (gplusid, handle, email, picture) {
+	const autoConfirm = Google.settings.autoconfirm;
+
+	let uid = await Google.getUidByGoogleId(gplusid);
+	if (uid) { // Existing User
+		return { uid };
+	}
+
+	uid = await User.getUidByEmail(email);
+	if (!uid) {
+		// Abort user creation if registration via SSO is restricted
+		if (Google.settings.disableRegistration) {
+			throw new Error('[[error:sso-registration-disabled, Google]]');
 		}
-	};
 
-	module.exports = Google;
-}(module));
+		// New User
+		uid = await User.create({ username: handle, email: !autoConfirm ? email : undefined });
+	}
+
+	if (autoConfirm) {
+		await User.setUserField(uid, 'email', email);
+		await User.email.confirmByUid(uid);
+	}
+	// Save google-specific information to the user
+	await User.setUserField(uid, 'gplusid', gplusid);
+	await db.setObjectField('gplusid:uid', gplusid, uid);
+
+	// Save their photo, if present
+	if (picture) {
+		await User.setUserField(uid, 'uploadedpicture', picture);
+		await User.setUserField(uid, 'picture', picture);
+	}
+	return { uid };
+};
+
+Google.getUidByGoogleId = async function (gplusid) {
+	const uid = await db.getObjectField('gplusid:uid', gplusid);
+	return uid;
+};
+
+Google.addMenuItem = function (custom_header) {
+	custom_header.authentication.push({
+		route: constants.admin.route,
+		icon: constants.admin.icon,
+		name: constants.name,
+	});
+
+	return custom_header;
+};
+
+Google.deleteUserData = async function (data) {
+	const { uid } = data;
+	const gplusid = await User.getUserField(uid, 'gplusid');
+	if (gplusid) {
+		await db.deleteObjectField('gplusid:uid', gplusid);
+		await db.deleteObjectField(`user:${uid}`, 'gplusid');
+	}
+};
+
+module.exports = Google;
+
