@@ -172,11 +172,11 @@ Google.login = async function (gplusid, handle, email, picture) {
 	await User.setUserField(uid, 'gplusid', gplusid);
 	await db.setObjectField('gplusid:uid', gplusid, uid);
 
-	// Save their photo, if present
-	if (picture) {
-		await User.setUserField(uid, 'uploadedpicture', picture);
-		await User.setUserField(uid, 'picture', picture);
-	}
+	// Profile picture setting disabled
+	// if (picture) {
+	//     await User.setUserField(uid, 'uploadedpicture', picture);
+	//     await User.setUserField(uid, 'picture', picture);
+	// }
 	return { uid };
 };
 
